@@ -17,6 +17,8 @@ OUT_DIR="$REPO_ROOT/vendor/heimdall"
 HEIMDALL_REPO="https://github.com/Benjamin-Dobell/Heimdall.git"
 HEIMDALL_COMMIT="3997d5cc607e6c603c6e7c0d07e42e9868c62af2"
 ODINMAC_PATCH="$REPO_ROOT/patches/heimdall-use-local-pit.patch"
+MACOS_DETACH_PATCH="$REPO_ROOT/patches/heimdall-macos-kernel-detach.patch"
+FLASH_BY_FILENAME_PATCH="$REPO_ROOT/patches/heimdall-flash-by-filename.patch"
 
 LIBUSB_PREFIX="$(brew --prefix libusb 2>/dev/null || true)"
 if [ -z "$LIBUSB_PREFIX" ] || [ ! -f "$LIBUSB_PREFIX/lib/libusb-1.0.a" ]; then
@@ -30,6 +32,8 @@ git clone --depth 1 "$HEIMDALL_REPO" "$SRC_DIR"
 git -C "$SRC_DIR" fetch --depth 1 origin "$HEIMDALL_COMMIT"
 git -C "$SRC_DIR" checkout --detach "$HEIMDALL_COMMIT"
 git -C "$SRC_DIR" apply "$ODINMAC_PATCH"
+git -C "$SRC_DIR" apply "$MACOS_DETACH_PATCH"
+git -C "$SRC_DIR" apply "$FLASH_BY_FILENAME_PATCH"
 COMMIT="$(cd "$SRC_DIR" && git rev-parse HEAD)"
 
 echo "==> Compiling heimdall CLI (static libusb, arm64)..."

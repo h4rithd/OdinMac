@@ -1,0 +1,46 @@
+diff --git a/heimdall/source/BridgeManager.cpp b/heimdall/source/BridgeManager.cpp
+index 1b658c8..7eb56aa 100644
+--- a/heimdall/source/BridgeManager.cpp
++++ b/heimdall/source/BridgeManager.cpp
+@@ -231,9 +231,18 @@ bool BridgeManager::ClaimDeviceInterface(void)
+ {
+ 	Interface::Print("Claiming interface...\n");
+ 
++	// OdinMac: modern Samsung devices present Download Mode as a CDC ACM
++	// ("Gadget Serial") interface that macOS auto-binds AppleUSBCDCACM to.
++	// Unless libusb detaches that driver, set_interface_alt_setting fails with
++	// "Setting up interface failed!". Enable auto-detach before claiming
++	// (supported on macOS as of libusb 1.0.30).
++#if defined(OS_LINUX) || defined(__APPLE__)
++	libusb_set_auto_detach_kernel_driver(deviceHandle, 1);
++#endif
++
+ 	int result = libusb_claim_interface(deviceHandle, interfaceIndex);
+ 
+-#ifdef OS_LINUX
++#if defined(OS_LINUX) || defined(__APPLE__)
+ 
+ 	if (result != LIBUSB_SUCCESS)
+ 	{
+@@ -279,7 +288,7 @@ void BridgeManager::ReleaseDeviceInterface(void)
+ 
+ 	libusb_release_interface(deviceHandle, interfaceIndex);
+ 
+-#ifdef OS_LINUX
++#if defined(OS_LINUX) || defined(__APPLE__)
+ 
+ 	if (detachedDriver)
+ 	{
+diff --git a/heimdall/source/BridgeManager.h b/heimdall/source/BridgeManager.h
+index a674767..c1d293d 100644
+--- a/heimdall/source/BridgeManager.h
++++ b/heimdall/source/BridgeManager.h
+@@ -121,7 +121,7 @@ namespace Heimdall
+ 
+ 			bool interfaceClaimed;
+ 
+-#ifdef OS_LINUX
++#if defined(OS_LINUX) || defined(__APPLE__)
+ 
+ 			bool detachedDriver;
+ 

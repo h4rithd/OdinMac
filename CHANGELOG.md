@@ -1,5 +1,32 @@
 # Changelog
 
+## v1.1.5
+
+### Fixed
+
+- **Flashing on macOS now uses a single Odin session.** Previously, when a
+  firmware set had no PIT, OdinMac ran `download-pit` and then `flash` as two
+  separate Heimdall processes — i.e. two Odin sessions. Many devices refuse the
+  second session (`Protocol initialisation failed` / a hung `Beginning
+  session`), so the flash failed even though the PIT download had succeeded.
+  OdinMac now flashes in one session and lets Heimdall download the device PIT
+  internally, mapping each image to a partition by its PIT flash filename.
+- **Bundled Heimdall now detaches the macOS CDC ACM kernel driver.** Modern
+  Samsung devices present Download Mode as a CDC ACM ("Gadget Serial")
+  interface that macOS auto-binds `AppleUSBCDCACM` to, which made
+  `set_interface_alt_setting` fail with "Setting up interface failed!". The
+  bundled Heimdall only detached kernel drivers on Linux; it now does so on
+  macOS too (`libusb_set_auto_detach_kernel_driver`, supported by libusb
+  1.0.30).
+
+### Heimdall patches
+
+- `patches/heimdall-macos-kernel-detach.patch` — detach the kernel driver on
+  macOS before claiming the interface.
+- `patches/heimdall-flash-by-filename.patch` — let `flash` match files to PIT
+  entries by flash filename and skip files the device PIT does not define
+  (instead of aborting), enabling single-session flashing.
+
 ## v1.1.4
 
 ### Fixed

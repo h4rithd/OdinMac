@@ -115,59 +115,18 @@ final class FirmwareFlasher: ObservableObject {
             extractedFiles += try extractArchive(archive, into: workDir, tag: slot.id)
         }
 
-        // 3. Prefer the firmware's PIT for mapping. This is read-only unless the
-        // user explicitly enables Repartition.
+        // 3. Decide how to map partitions, always within a SINGLE Odin session.
+        //    - Firmware PIT present → OdinMac maps each image locally and flashes
+        //      with --use-local-pit (no device-PIT download needed).
+        //    - No firmware PIT → flash in one session and let Heimdall download the
+        //      device PIT itself, mapping each file by its PIT flash filename.
+        //      This avoids a separate download-pit session; many devices refuse the
+        //      second Odin session that a standalone PIT download would require.
         let bundledPIT = Self.firmwarePIT(in: extractedFiles)
-        let pitData: Data
-        let resumeFlash: Bool
-
-        if let bundledPIT {
-            pitData = try Data(contentsOf: bundledPIT)
-            resumeFlash = false
-            log("Using firmware PIT for partition mapping: \(bundledPIT.lastPathComponent)", .success)
-        } else {
-            state = .downloadingPIT
-            log("No firmware PIT found. Downloading PIT from device…")
-            pitData = try await heimdall.downloadPIT { [weak self] line in
-                Task { @MainActor in self?.log(line, self?.classify(line) ?? .info) }
-            }
-            resumeFlash = true
-        }
-
-        let pit = try PITParser.parse(pitData)
-        pitTable = pit
-        log("PIT: \(pit.entryCount) partitions.", .success)
-        try Task.checkCancellation()
-
-        // 4. Map each extracted image to a PIT partition.
-        state = .gettingDeviceInfo
-        var flashPlan = FlashPartitionPlan()
-        var skipped: [String] = []
-        var needLZ4: [String] = []
 
         let lz4 = locateLZ4()
         log("lz4 tool: \(lz4?.path ?? "not found")", .info)
 
-        for image in extractedFiles where image.pathExtension.lowercased() != "pit" {
-            guard let (name, prepared) = try mapImage(image, pit: pit, lz4: lz4, needLZ4: &needLZ4) else {
-                skipped.append(image.lastPathComponent)
-                continue
-            }
-            let partition = FlashPartition(name: name, file: prepared)
-            if let replaced = flashPlan.add(partition) {
-                log("  \(image.lastPathComponent)  →  \(name)  [replaces \(replaced.file.lastPathComponent)]", .warning)
-            } else {
-                log("  \(image.lastPathComponent)  →  \(name)", .success)
-            }
-        }
-
-        // Safety: never flash a compressed blob as a raw image.
-        if !needLZ4.isEmpty { throw FlashError.compressedNeedsLZ4(needLZ4) }
-        if !skipped.isEmpty {
-            log("Skipped (no PIT match): \(skipped.joined(separator: ", "))", .warning)
-        }
-        let partitions = flashPlan.partitions
-        log("Flash plan: \(partitions.map { $0.name }.joined(separator: ", "))", .info)
         // Inform the user when a Magisk-patched archive only patches BOOT.
         let hasMagiskPatch = config.slots.contains {
             $0.fileURL?.lastPathComponent.lowercased().hasPrefix("magisk_patched") == true
@@ -175,34 +134,82 @@ final class FirmwareFlasher: ObservableObject {
         if hasMagiskPatch {
             log("Note: magisk_patched archives only contain a patched BOOT image. SYSTEM and other partitions are NOT included and will not be changed. Flash the full stock AP first if a system upgrade is also needed.", .info)
         }
+
+        state = .gettingDeviceInfo
+        let partitions: [FlashPartition]
+        let flashPIT: URL?
+        var needLZ4: [String] = []
+
+        if let bundledPIT {
+            // Firmware-PIT path: map each image against the firmware PIT.
+            let pit = try PITParser.parse(try Data(contentsOf: bundledPIT))
+            pitTable = pit
+            log("Using firmware PIT for partition mapping: \(bundledPIT.lastPathComponent)", .success)
+            log("PIT: \(pit.entryCount) partitions.", .success)
+            try Task.checkCancellation()
+
+            var flashPlan = FlashPartitionPlan()
+            var skipped: [String] = []
+            for image in extractedFiles where image.pathExtension.lowercased() != "pit" {
+                guard let (name, prepared) = try mapImage(image, pit: pit, lz4: lz4, needLZ4: &needLZ4) else {
+                    skipped.append(image.lastPathComponent)
+                    continue
+                }
+                let partition = FlashPartition(name: name, file: prepared)
+                if let replaced = flashPlan.add(partition) {
+                    log("  \(image.lastPathComponent)  →  \(name)  [replaces \(replaced.file.lastPathComponent)]", .warning)
+                } else {
+                    log("  \(image.lastPathComponent)  →  \(name)", .success)
+                }
+            }
+            if !skipped.isEmpty {
+                log("Skipped (no PIT match): \(skipped.joined(separator: ", "))", .warning)
+            }
+            partitions = flashPlan.partitions
+            flashPIT = bundledPIT
+        } else {
+            // No firmware PIT: single-session flash. Decompress LZ4 images, then pass
+            // each file to Heimdall as "--<filename> <path>". Heimdall downloads the
+            // device PIT in the same session and maps every file by its PIT flash
+            // filename, skipping anything the PIT does not define.
+            log("No firmware PIT. Heimdall will map files using the device PIT in one session.")
+            var files: [FlashPartition] = []
+            for image in extractedFiles where image.pathExtension.lowercased() != "pit" {
+                guard let prepared = try prepareRawImage(image, lz4: lz4, needLZ4: &needLZ4) else { continue }
+                files.append(FlashPartition(name: prepared.lastPathComponent, file: prepared))
+                log("  queued \(prepared.lastPathComponent)", .info)
+            }
+            partitions = files
+            flashPIT = nil
+        }
+
+        // Safety: never flash a compressed blob as a raw image.
+        if !needLZ4.isEmpty { throw FlashError.compressedNeedsLZ4(needLZ4) }
         guard !partitions.isEmpty else { throw FlashError.nothingToFlash }
+        log("Flash plan: \(partitions.map { $0.name }.joined(separator: ", "))", .info)
         try Task.checkCancellation()
 
-        // 5. Flash everything in one Heimdall invocation.
+        // 4. Flash everything in a single Heimdall invocation / Odin session.
         totalParts = partitions.count
         completedParts = 0
         currentPartition = partitions.first?.name ?? ""
         state = .flashing(partition: currentPartition, progress: 0)
         log("Flashing \(partitions.count) partition(s) via Heimdall…")
 
-        var flashPIT = bundledPIT
-        if flashPIT == nil {
-            flashPIT = workDir.appendingPathComponent("device.pit")
-            try pitData.write(to: flashPIT!)
-        }
-        if config.repartition { log("Re-partition enabled: the selected PIT will be written.", .warning) }
+        let repartition = flashPIT != nil && config.repartition
+        if repartition { log("Re-partition enabled: the selected PIT will be written.", .warning) }
 
         try await heimdall.flash(
             partitions: partitions,
             pit: flashPIT,
-            repartition: config.repartition,
-            resume: resumeFlash,
+            repartition: repartition,
+            resume: false,
             reboot: config.rebootAfterFlash
         ) { [weak self] line in
             Task { @MainActor in self?.handleFlashLine(line) }
         }
 
-        // 6. Done.
+        // 5. Done.
         state = .finishing
         overallProgress = 1.0
         state = .success
@@ -324,6 +331,28 @@ final class FirmwareFlasher: ObservableObject {
 
         guard let name = partitionName(forFile: matchName, in: pit) else { return nil }
         return (name, fileToFlash)
+    }
+
+    /// Decompresses an `.lz4` image (if needed) and returns the raw file ready to
+    /// flash. Used by the single-session, no-firmware-PIT path where Heimdall maps
+    /// each file to a partition itself. Records the file in `needLZ4` (and returns
+    /// nil) when an `.lz4` image is found but the lz4 tool is missing, so the flash
+    /// can abort safely instead of sending a compressed blob to the device.
+    private func prepareRawImage(_ image: URL, lz4: URL?, needLZ4: inout [String]) throws -> URL? {
+        let name = image.lastPathComponent
+        guard name.lowercased().hasSuffix(".lz4") else { return image }
+
+        guard let lz4 else { needLZ4.append(name); return nil }
+        let out = image.deletingPathExtension()   // drop .lz4
+        let proc = Process()
+        proc.executableURL = lz4
+        proc.arguments = ["-d", "-f", image.path, out.path]
+        proc.standardError = Pipe()
+        proc.standardOutput = Pipe()
+        try proc.run()
+        proc.waitUntilExit()
+        guard proc.terminationStatus == 0 else { throw FlashError.extractionFailed(name) }
+        return out
     }
 
     private func partitionName(forFile fileName: String, in pit: PITTable) -> String? {

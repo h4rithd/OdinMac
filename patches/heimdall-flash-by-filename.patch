@@ -1,0 +1,71 @@
+diff --git a/heimdall/source/FlashAction.cpp b/heimdall/source/FlashAction.cpp
+index e638661..cabaea9 100644
+--- a/heimdall/source/FlashAction.cpp
++++ b/heimdall/source/FlashAction.cpp
+@@ -195,6 +195,27 @@ static bool sendTotalTransferSize(BridgeManager *bridgeManager, const vector<Par
+ 	return (true);
+ }
+ 
++// OdinMac: ASCII case-insensitive comparison (no ctype/locale dependency).
++static bool odinmacEqualsIgnoreCase(const char *a, const char *b)
++{
++	if (!a || !b)
++		return (false);
++
++	while (*a && *b)
++	{
++		char ca = (*a >= 'A' && *a <= 'Z') ? (*a - 'A' + 'a') : *a;
++		char cb = (*b >= 'A' && *b <= 'Z') ? (*b - 'A' + 'a') : *b;
++
++		if (ca != cb)
++			return (false);
++
++		a++;
++		b++;
++	}
++
++	return (*a == '\0' && *b == '\0');
++}
++
+ static bool setupPartitionFlashInfo(const vector<PartitionFile>& partitionFiles, const PitData *pitData, vector<PartitionFlashInfo>& partitionFlashInfos)
+ {
+ 	for (vector<PartitionFile>::const_iterator it = partitionFiles.begin(); it != partitionFiles.end(); it++)
+@@ -216,13 +237,35 @@ static bool setupPartitionFlashInfo(const vector<PartitionFile>& partitionFiles,
+ 		}
+ 		else
+ 		{
+-			// The argument must be an partition name e.g. "ZIMAGE"
++			// The argument must be a partition name e.g. "ZIMAGE"
+ 			pitEntry = pitData->FindEntry(it->argumentName);
+ 
++			// OdinMac: if nothing matches by partition name, match the argument
++			// against each PIT entry's flash filename. This lets OdinMac flash in
++			// a single Heimdall session by passing "--<image filename> <path>" and
++			// letting the device's own PIT choose the target partition.
+ 			if (!pitEntry)
+ 			{
+-				Interface::PrintError("Partition \"%s\" does not exist in the specified PIT.\n", it->argumentName);
+-				return (false);
++				for (unsigned int entryIndex = 0; entryIndex < pitData->GetEntryCount(); entryIndex++)
++				{
++					const PitEntry *candidate = pitData->GetEntry(entryIndex);
++					const char *flashFilename = candidate->GetFlashFilename();
++
++					if (flashFilename && flashFilename[0] != '\0'
++						&& odinmacEqualsIgnoreCase(flashFilename, it->argumentName))
++					{
++						pitEntry = candidate;
++						break;
++					}
++				}
++			}
++
++			// OdinMac: a file the device PIT does not define (e.g. fota.zip) is
++			// skipped instead of aborting the whole flash.
++			if (!pitEntry)
++			{
++				Interface::Print("Skipping \"%s\" - no matching partition in the device PIT.\n", it->argumentName);
++				continue;
+ 			}
+ 		}
+ 
