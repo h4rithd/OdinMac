@@ -22,7 +22,13 @@ final class HeimdallManager: @unchecked Sendable {
                 let tail = out.split(separator: "\n").suffix(4).joined(separator: "\n")
                 return "heimdall \(cmd) failed:\n\(tail)"
             case .reconnectRequired:
-                return "The Samsung USB interface is stuck. Disconnect the cable, exit and re-enter Download Mode, reconnect the cable, then try again."
+                return """
+                The USB transfer stalled and the Samsung interface is stuck. This is almost always a USB signal issue, not a phone fault. Try, in order:
+                1. Fully power the phone off, then re-enter Download Mode from cold.
+                2. Use a different, high-quality data cable (not a charge-only cable).
+                3. Plug into a USB 2.0 port or a powered USB 2.0 hub — Download Mode is far more reliable at USB 2.0 speeds than through USB 3 / Thunderbolt-C directly.
+                Then reconnect and try again.
+                """
             case .firmwarePITRequired:
                 return "This phone cannot reliably send its PIT through Heimdall. Select the matching CSC or HOME_CSC firmware archive containing a .pit file, then try again."
             }

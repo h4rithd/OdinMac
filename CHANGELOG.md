@@ -1,5 +1,25 @@
 # Changelog
 
+## v1.1.4
+
+### Fixed
+
+- **Detection regression from v1.1.3**: the IOKit USB check built a matching
+  dictionary with an `idVendor` key and passed it to
+  `IOServiceGetMatchingServices`. That style of property match silently
+  returns nothing on macOS, so the two-stage gate (`onBus && heimdall detect`)
+  always evaluated to `false` and **suppressed all device detection**, even
+  when `heimdall detect` succeeded on its own. Replaced it with a registry
+  enumeration that reads each USB device node's `idVendor` / `idProduct`
+  directly (verified against a real device: VID 0x04E8, PID 0x685D).
+- IOKit is now an **OR** signal alongside `heimdall detect`, never a gate in
+  front of it — a failure in either path can no longer hide a connected
+  device. Detection also now recognizes Download Mode product IDs
+  (0x6601, 0x685D, 0x68C3) directly from the registry.
+- Reworded the stalled-transfer guidance to name the real cause (USB signal
+  integrity) and the fixes that actually work: cold-boot into Download Mode,
+  a known-good data cable, and a USB 2.0 port / powered USB 2.0 hub.
+
 ## v1.1.3
 
 ### Fixed

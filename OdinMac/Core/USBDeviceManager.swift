@@ -2,25 +2,36 @@ import Foundation
 import Combine
 import IOKit
 
-/// Watches for a Samsung device in Download Mode using a two-stage approach:
+/// Watches for a Samsung device in Download Mode.
 ///
-///  1. IOKit direct check — queries the USB bus for any Samsung VID (0x04E8) device
-///     without claiming any interface (~1 ms, never fails due to USB state issues).
-///  2. Heimdall confirm — only runs `heimdall detect` if stage 1 found something,
-///     to verify the device is actually responding to the Odin Download Mode handshake.
+/// Detection uses two independent signals OR'd together, so a hiccup in either
+/// one never hides a genuinely-connected device:
 ///
-/// This avoids the previous single-subprocess approach which could silently fail on
-/// macOS 15+ when the USB accessory hadn't been explicitly approved in System Settings,
-/// or when the device's USB interface was stuck from a prior failed session.
+///  1. `heimdall detect` — confirms the device answers the Odin handshake.
+///  2. IOKit registry scan — finds a Samsung device (VID 0x04E8) whose product
+///     ID is a known Download Mode PID, read directly from the USB registry.
+///     This needs no interface claim and no subprocess, so it works even when
+///     the device's USB interface is busy or macOS hasn't surfaced it to the
+///     `heimdall` subprocess yet.
+///
+/// IMPORTANT: IOKit is used as an *additional* signal, never as a gate in front
+/// of Heimdall. (An earlier version gated `heimdall detect` behind a USB-vendor
+/// match built with `IOServiceMatching` + an `idVendor` key in the matching
+/// dictionary; that style of match silently returns nothing on macOS, which
+/// suppressed all detection. The reliable approach — used below — is to
+/// enumerate the device nodes and read each one's `idVendor`/`idProduct`.)
 final class USBDeviceManager: ObservableObject {
 
     /// Samsung Electronics USB vendor ID.
     static let samsungVID = 0x04E8
+    /// Samsung Download / Odin mode product IDs (per Heimdall's device list).
+    static let downloadModePIDs: Set<Int> = [0x6601, 0x685D, 0x68C3]
 
     @Published private(set) var isConnected = false
     @Published private(set) var deviceInfo: DeviceInfo?
-    /// True when a Samsung device (any mode) is visible on the USB bus via IOKit,
-    /// even if it hasn't entered Download Mode yet. Lets the UI give a better hint.
+    /// True when *any* Samsung device is visible on the USB bus, even if it
+    /// hasn't entered Download Mode. Lets the UI tell "bad cable / wrong mode"
+    /// apart from "nothing plugged in".
     @Published private(set) var usbBusPresent = false
 
     private let heimdall: HeimdallManager
@@ -54,39 +65,61 @@ final class USBDeviceManager: ObservableObject {
         heimdall.queue.async { [weak self] in
             guard let self else { return }
 
-            // Stage 1 — IOKit: is any Samsung device visible on the USB bus at all?
-            // This never claims an interface so it always works regardless of USB state.
-            let onBus = Self.isSamsungOnUSBBus()
-
-            // Stage 2 — heimdall detect: only run if stage 1 found something.
-            // This confirms the device is in Download Mode and responding.
-            let inDL = onBus && self.heimdall.detectOnQueue()
+            let bus = Self.samsungBusState()
+            // OR the two signals — either one alone is enough to count as connected.
+            let inDownloadMode = self.heimdall.detectOnQueue() || bus.downloadMode
 
             DispatchQueue.main.async {
                 self.inFlight = false
-                self.usbBusPresent = onBus
-                guard inDL != self.isConnected else { return }
-                self.isConnected = inDL
-                self.deviceInfo = inDL ? DeviceInfo(productName: "Samsung (Download Mode)",
-                                                    platform: "Odin / Download Mode") : nil
-                self.onConnected?(inDL)
+                self.usbBusPresent = bus.present
+                guard inDownloadMode != self.isConnected else { return }
+                self.isConnected = inDownloadMode
+                self.deviceInfo = inDownloadMode
+                    ? DeviceInfo(productName: "Samsung (Download Mode)",
+                                 platform: "Odin / Download Mode")
+                    : nil
+                self.onConnected?(inDownloadMode)
             }
         }
     }
 
-    /// Returns true if any Samsung device (VID 0x04E8) appears in the IOKit USB registry.
-    /// Does NOT open or claim any interface — safe to call at any time, even mid-flash.
-    /// Tries IOUSBHostDevice (macOS 12+) first, then falls back to IOUSBDevice.
-    static func isSamsungOnUSBBus() -> Bool {
+    /// Scans the IOKit USB registry for Samsung devices by reading each device
+    /// node's `idVendor` / `idProduct` properties directly. Never opens or claims
+    /// an interface, so it is safe to call at any time, including mid-flash.
+    ///
+    /// - Returns: `present` — a Samsung device (VID 0x04E8) is on the bus;
+    ///            `downloadMode` — its product ID is a known Download Mode PID.
+    static func samsungBusState() -> (present: Bool, downloadMode: Bool) {
+        var present = false
+        var downloadMode = false
+
+        // IOUSBHostDevice is the modern class (macOS 10.11+); IOUSBDevice is the
+        // legacy alias. Scan both so we work across macOS versions.
         for className in ["IOUSBHostDevice", "IOUSBDevice"] {
-            guard let base = IOServiceMatching(className) else { continue }
-            let dict = base as NSMutableDictionary
-            dict["idVendor"] = samsungVID
+            guard let matching = IOServiceMatching(className) else { continue }
             var iter: io_iterator_t = 0
-            guard IOServiceGetMatchingServices(0, dict as CFDictionary, &iter) == KERN_SUCCESS else { continue }
+            guard IOServiceGetMatchingServices(kIOMainPortDefault, matching, &iter) == KERN_SUCCESS else { continue }
             defer { IOObjectRelease(iter) }
-            if IOIteratorNext(iter) != 0 { return true }
+
+            var service = IOIteratorNext(iter)
+            while service != 0 {
+                if intProperty(service, "idVendor") == samsungVID {
+                    present = true
+                    if let pid = intProperty(service, "idProduct"), downloadModePIDs.contains(pid) {
+                        downloadMode = true
+                    }
+                }
+                IOObjectRelease(service)
+                service = IOIteratorNext(iter)
+            }
         }
-        return false
+        return (present, downloadMode)
+    }
+
+    private static func intProperty(_ service: io_service_t, _ key: String) -> Int? {
+        guard let ref = IORegistryEntryCreateCFProperty(service, key as CFString, kCFAllocatorDefault, 0) else {
+            return nil
+        }
+        return (ref.takeRetainedValue() as? NSNumber)?.intValue
     }
 }
