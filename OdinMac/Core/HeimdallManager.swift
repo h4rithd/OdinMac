@@ -131,6 +131,7 @@ final class HeimdallManager: @unchecked Sendable {
             )
             let r = self.runSync(args, onLine: onLine)
             guard Self.isSuccessfulFlashResult(exitCode: r.exitCode, output: r.output) else {
+                if Self.needsReconnect(r.output) { throw HeimdallError.reconnectRequired }
                 throw HeimdallError.commandFailed("flash", r.output)
             }
         }
@@ -185,7 +186,10 @@ final class HeimdallManager: @unchecked Sendable {
         let text = output.lowercased()
         return text.contains("setting up interface failed") ||
                text.contains("claiming interface failed") ||
-               text.contains("failed to access device")
+               text.contains("failed to access device") ||
+               text.contains("failed to begin session") ||
+               text.contains("pipe is stalled") ||
+               text.contains("bulk transfer failed")
     }
 
     static func needsFirmwarePIT(_ output: String) -> Bool {

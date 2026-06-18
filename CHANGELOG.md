@@ -1,5 +1,18 @@
 # Changelog
 
+## v1.1.2
+
+### Fixed
+
+- USB pipe stall errors (`pipe is stalled`, `bulk transfer failed`) and
+  `Failed to begin session` failures now correctly trigger the
+  "disconnect, re-enter Download Mode, reconnect" guidance instead of
+  showing a raw Heimdall error. Previously only `Setting up interface failed`
+  and `Claiming interface failed` were caught.
+- Flash errors now run the same reconnect-required check as PIT download
+  errors, so the helpful reconnect message appears on the **first** failure
+  instead of only on a subsequent retry.
+
 ## Unreleased
 
 ### Added
